@@ -125,6 +125,7 @@ def summarize(events: list[dict], samples: list[dict]) -> tuple[dict, list[dict]
     queue = [starts[r] - arrivals[r] for r in starts if r in arrivals]
     hits = sum(e.get("path") == "hit" for e in routes.values())
     reuses = [e["hits"] for e in entries.values()]
+    profiled_reuses = [e["hits_after_profile"] for e in entries.values() if e["profiled"]]
     overlap = 0.0
     for device, p0, p1 in profile_intervals:
         for other_device, f0, f1 in foreground_intervals:
@@ -153,6 +154,13 @@ def summarize(events: list[dict], samples: list[dict]) -> tuple[dict, list[dict]
         "reuse_before_eviction_or_end": {
             "zero_fraction": (sum(n == 0 for n in reuses) / len(reuses) if reuses else None),
             "p50": percentile(reuses, 50), "p90": percentile(reuses, 90),
+        },
+        "reuse_after_profile_before_eviction_or_end": {
+            "entries": len(profiled_reuses),
+            "zero_fraction": (sum(n == 0 for n in profiled_reuses) / len(profiled_reuses)
+                              if profiled_reuses else None),
+            "p50": percentile(profiled_reuses, 50),
+            "p90": percentile(profiled_reuses, 90),
         },
         "profile_events": dict(profile_counts),
         "profile_decode_wall_s_by_device": dict(profile_gpu),

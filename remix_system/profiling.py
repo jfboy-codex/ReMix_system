@@ -102,6 +102,7 @@ class ProfileCoordinator:
                     if self.events:
                         self.events.record("profile_cancel", job_id=job_id,
                                            entry_id=job.entry_id, reason="evicted")
+                    self._changed.notify_all()
                     continue
                 job.state = "decoding"
                 return job_id, job.trace.latents[job.cursor]
@@ -157,7 +158,11 @@ class ProfileCoordinator:
                         self._changed.notify_all()
                         continue
                 # Final source-image score and publication happen outside the lock.
+                score_started = time.perf_counter()
                 original = self.score(job.source_image, job.source_prompt)
+                if self.events:
+                    self.events.record("profile_score", job_id=job_id,
+                                       step="source", duration_s=time.perf_counter()-score_started)
                 profile = Profile(job.scores[0][0], step, original, tuple(job.scores))
                 self.cache.publish_profile(job.entry_id, job.entry_version, profile)
                 if self.events:

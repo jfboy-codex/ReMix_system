@@ -47,6 +47,7 @@ The two workers must not share one VAE object across devices. Set `policy=ReMixP
 ## Verification
 
 For the reviewer-facing paired profiling experiment (800 requests, FIFO capacity 200, one run per configuration), see [EXPERIMENT_PLAN.md](EXPERIMENT_PLAN.md). Generate a fixed trace with `prepare_trace.py`, then pass it to `run_service.py --trace ... --mode no-profile|idle-profile`. The driver records request, profile, cache, GPU utilization, memory, and output CLIP data in the output directory.
+Run `evaluate_pickscore.py --output <run-directory>` after serving to score generated images with the old experiment's local PickScore model without affecting latency measurements.
 
 Run `python -B -m unittest discover -s tests -v`. The tests use deterministic fake backends to check miss-to-profile-to-hit flow, invalidation after cache eviction, foreground priority between profile chunks, and gap-responsive step selection. They do not measure image quality or GPU performance.
 
