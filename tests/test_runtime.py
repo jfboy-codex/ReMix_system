@@ -34,6 +34,41 @@ def profile_score(image, prompt):
 
 
 class RuntimeTests(unittest.TestCase):
+    def _profile_curve(self, curve, stride=4):
+        cache = CacheManager(lambda image, prompt: 0, threshold=1, capacity=1)
+        events = EventLog()
+        scorer = lambda image, prompt: curve(16 if image == -1 else image)
+        profiler = ProfileCoordinator(cache, scorer, events=events, clip_stride=stride)
+        entry = cache.insert("curve", -1)
+        profiler.enqueue(entry, Trace(tuple(range(17)), (0,) + (1,) * 16))
+        device = DeviceManager("test-gpu", lambda x: x, ProfileDecoder(FakeDecoder()), profiler)
+        try:
+            self.assertTrue(profiler.wait_empty(2))
+            profile = cache.snapshot()[0].profile
+            completion = next(e for e in events.snapshot() if e["kind"] == "profile_complete")
+            return profile, completion
+        finally:
+            device.close()
+            profiler.close()
+
+    def test_smooth_curve_uses_only_stride_checkpoints(self):
+        profile, completion = self._profile_curve(lambda step: 0.1 + step * 0.001)
+        self.assertEqual([step for step, _ in profile.points], [0, 4, 8, 12, 16])
+        self.assertEqual((completion["coarse_steps"], completion["fine_steps"]), (5, 0))
+
+    def test_slope_jump_refines_internal_steps(self):
+        curve = lambda step: 0.1 + step * 0.001 + (0.08 if step >= 10 else 0)
+        profile, completion = self._profile_curve(curve)
+        scored = {step for step, _ in profile.points}
+        self.assertTrue({9, 10, 11}.issubset(scored))
+        self.assertGreater(completion["fine_steps"], 0)
+        self.assertLess(completion["coarse_steps"] + completion["fine_steps"], 17)
+
+    def test_stride_one_scores_every_step(self):
+        profile, completion = self._profile_curve(lambda step: 0.1 + step * 0.001, stride=1)
+        self.assertEqual(len(profile.points), 17)
+        self.assertEqual(completion["fine_steps"], 0)
+
     def test_miss_profiles_and_hit_uses_ready_profile(self):
         runtime = ReMixRuntime(FakeLarge(), FakeSmall(), FakeDecoder(), FakeDecoder(),
                                cache_score, profile_score, threshold=0.5, capacity=2)

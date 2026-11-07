@@ -25,12 +25,20 @@ class ReMixRuntime:
                  policy: ReMixPolicy | None = None,
                  max_pending_profiles: int = 16,
                  profile_enabled: bool = True,
-                 events: EventLog | None = None):
+                 events: EventLog | None = None,
+                 profile_clip_stride: int = 4,
+                 profile_stable_tolerance: float = 0.002,
+                 profile_slope_jump_threshold: float = 0.006,
+                 profile_steep_slope_threshold: float = 0.01):
         self.events = events
         self.profile_enabled = profile_enabled
         self.cache = CacheManager(cache_score, threshold, capacity, events=events)
         self.profiles = ProfileCoordinator(self.cache, profile_score,
-                                           max_pending=max_pending_profiles, events=events)
+                                           max_pending=max_pending_profiles, events=events,
+                                           stable_tolerance=profile_stable_tolerance,
+                                           clip_stride=profile_clip_stride,
+                                           slope_jump_threshold=profile_slope_jump_threshold,
+                                           steep_slope_threshold=profile_steep_slope_threshold)
         self.policy = policy or ReMixPolicy(hit_threshold=threshold)
         self.large = DeviceManager("gpu-large", LargeWorker(large).execute,
                                    ProfileDecoder(large_decoder), self.profiles, events=events)

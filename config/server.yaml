@@ -42,6 +42,11 @@ serving:
     diffusiondb: 0.26
   cache_capacity: 200
   max_pending_profiles: 16
+  profile:
+    clip_stride: 4
+    stable_tolerance: 0.002
+    slope_jump_threshold: 0.006
+    steep_slope_threshold: 0.01
   fallback_start_step: 20
   seed: 42
   # Full SD3.5 generation and online profiling are required for serving measurements.

@@ -79,6 +79,9 @@ def summarize(events: list[dict], samples: list[dict]) -> tuple[dict, list[dict]
     profile_gpu = defaultdict(float)
     profile_cpu = 0.0
     profile_counts = defaultdict(int)
+    coarse_scores = 0
+    fine_scores = 0
+    refined_entries = 0
     active_profiles = {}
     active_foreground = {}
     profile_intervals = []
@@ -121,6 +124,10 @@ def summarize(events: list[dict], samples: list[dict]) -> tuple[dict, list[dict]
             profile_cpu += event["duration_s"]
         if kind in ("profile_enqueue", "profile_complete", "profile_cancel", "profile_drop", "profile_error"):
             profile_counts[kind] += 1
+        if kind == "profile_complete":
+            coarse_scores += event.get("coarse_steps", 0)
+            fine_scores += event.get("fine_steps", 0)
+            refined_entries += int(event.get("fine_steps", 0) > 0)
     latency = [dones[r] - arrivals[r] for r in dones if r in arrivals]
     queue = [starts[r] - arrivals[r] for r in starts if r in arrivals]
     hits = sum(e.get("path") == "hit" for e in routes.values())
@@ -163,6 +170,9 @@ def summarize(events: list[dict], samples: list[dict]) -> tuple[dict, list[dict]
             "p90": percentile(profiled_reuses, 90),
         },
         "profile_events": dict(profile_counts),
+        "profile_clip_coarse_scores": coarse_scores,
+        "profile_clip_fine_scores": fine_scores,
+        "profile_refined_entries": refined_entries,
         "profile_decode_wall_s_by_device": dict(profile_gpu),
         "profile_decode_chunks": len(profile_intervals),
         "profile_overlap_other_gpu_foreground_s": overlap,
