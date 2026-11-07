@@ -20,6 +20,7 @@ server = [
     "PyYAML>=6",
     "pandas>=2",
     "pyarrow>=12",
+    "nvidia-ml-py>=12",
 ]
 
 [tool.setuptools.packages.find]

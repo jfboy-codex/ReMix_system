@@ -3,6 +3,7 @@ import unittest
 
 from remix_system import Generated, Profile, ReMixRuntime, Trace
 from remix_system.cache import CacheEntry, CacheManager
+from remix_system.events import EventLog
 from remix_system.device import DeviceManager
 from remix_system.policy import ReMixPolicy
 from remix_system.profiling import ProfileCoordinator
@@ -111,6 +112,19 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(profiler.dropped, 1)
         finally:
             profiler.close()
+
+    def test_no_profile_mode_still_caches_and_reuses(self):
+        events = EventLog()
+        runtime = ReMixRuntime(FakeLarge(), FakeSmall(), FakeDecoder(), FakeDecoder(),
+                               cache_score, profile_score, threshold=0.5, capacity=2,
+                               profile_enabled=False, events=events)
+        try:
+            self.assertEqual(runtime.submit("source").result(timeout=2).path, "miss")
+            self.assertEqual(runtime.submit("edit").result(timeout=2).path, "hit")
+            self.assertIsNone(runtime.cache.snapshot()[0].profile)
+            self.assertFalse(any(e["kind"] == "profile_enqueue" for e in events.snapshot()))
+        finally:
+            runtime.close(timeout=2)
 
 
 if __name__ == "__main__":

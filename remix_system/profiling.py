@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .cache import CacheEntry, CacheManager
+from .events import EventLog
 from .types import Profile, Trace
 
 
@@ -29,11 +30,13 @@ class ProfileCoordinator:
     """Single owner of profile state. GPU chunks are claimed by idle devices."""
 
     def __init__(self, cache: CacheManager, score: Callable[[Any, str], float],
-                 stable_tolerance: float = 0.002, max_pending: int = 16):
+                 stable_tolerance: float = 0.002, max_pending: int = 16,
+                 events: EventLog | None = None):
         if max_pending <= 0:
             raise ValueError("max_pending must be positive")
         self.cache = cache
         self.score = score
+        self.events = events
         self.stable_tolerance = stable_tolerance
         self.max_pending = max_pending
         self.dropped = 0
@@ -69,11 +72,20 @@ class ProfileCoordinator:
             for old_id, old in tuple(self._jobs.items()):
                 if not self.cache.contains(old.entry_id, old.entry_version):
                     self._jobs.pop(old_id, None)
+                    if self.events:
+                        self.events.record("profile_cancel", job_id=old_id,
+                                           entry_id=old.entry_id, reason="evicted")
             if len(self._jobs) >= self.max_pending:
                 self.dropped += 1
+                if self.events:
+                    self.events.record("profile_drop", entry_id=entry.entry_id,
+                                       reason="pending_limit")
                 return None
             self._jobs[job.job_id] = job
             self._ready.append(job.job_id)
+            if self.events:
+                self.events.record("profile_enqueue", job_id=job.job_id,
+                                   entry_id=entry.entry_id, min_step=min_step)
             self._changed.notify_all()
         return job.job_id
 
@@ -87,6 +99,9 @@ class ProfileCoordinator:
                     continue
                 if not self.cache.contains(job.entry_id, job.entry_version):
                     self._jobs.pop(job_id, None)
+                    if self.events:
+                        self.events.record("profile_cancel", job_id=job_id,
+                                           entry_id=job.entry_id, reason="evicted")
                     continue
                 job.state = "decoding"
                 return job_id, job.trace.latents[job.cursor]
@@ -103,6 +118,8 @@ class ProfileCoordinator:
     def failed(self, job_id: str, error: Exception) -> None:
         with self._changed:
             self.errors.append((job_id, error))
+            if self.events:
+                self.events.record("profile_error", job_id=job_id, error=str(error))
             self._jobs.pop(job_id, None)
             self._changed.notify_all()
 
@@ -118,7 +135,11 @@ class ProfileCoordinator:
                     continue
                 step, prompt = job.cursor, job.source_prompt
             try:
+                score_started = time.perf_counter()
                 value = self.score(image, prompt)
+                if self.events:
+                    self.events.record("profile_score", job_id=job_id,
+                                       step=step, duration_s=time.perf_counter()-score_started)
                 with self._changed:
                     job = self._jobs.get(job_id)
                     if job is None or not self.cache.contains(job.entry_id, job.entry_version):
@@ -139,6 +160,9 @@ class ProfileCoordinator:
                 original = self.score(job.source_image, job.source_prompt)
                 profile = Profile(job.scores[0][0], step, original, tuple(job.scores))
                 self.cache.publish_profile(job.entry_id, job.entry_version, profile)
+                if self.events:
+                    self.events.record("profile_complete", job_id=job_id,
+                                       entry_id=job.entry_id, steps=len(job.scores))
                 with self._changed:
                     self._jobs.pop(job_id, None)
                     self._changed.notify_all()

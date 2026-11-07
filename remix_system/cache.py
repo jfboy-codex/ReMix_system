@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from .types import Profile
+from .events import EventLog
 
 
 @dataclass(frozen=True)
@@ -22,7 +23,8 @@ class CacheEntry:
 class CacheManager:
     """Owns entries, retrieval, eviction and atomic profile publication only."""
 
-    def __init__(self, score: Callable[[Any, str], float], threshold: float, capacity: int):
+    def __init__(self, score: Callable[[Any, str], float], threshold: float, capacity: int,
+                 events: EventLog | None = None):
         if capacity <= 0:
             raise ValueError("capacity must be positive")
         self._score = score
@@ -30,6 +32,7 @@ class CacheManager:
                                   hasattr(score, "encode_image"))
         self.threshold = threshold
         self.capacity = capacity
+        self.events = events
         self._entries: OrderedDict[str, CacheEntry] = OrderedDict()
         self._lock = threading.RLock()
 
@@ -50,6 +53,9 @@ class CacheManager:
                     break
                 current = self._entries.get(entry.entry_id)
                 if current is not None and current.version == entry.version:
+                    if self.events:
+                        self.events.record("cache_hit", entry_id=current.entry_id,
+                                           profiled=current.profile is not None)
                     return current, score
         return None, ranked[0][0] if ranked else 0.0
 
@@ -60,8 +66,12 @@ class CacheManager:
                            image_embedding=embedding)
         with self._lock:
             if len(self._entries) >= self.capacity:
-                self._entries.popitem(last=False)  # FIFO, replaceable policy boundary.
+                _, evicted = self._entries.popitem(last=False)
+                if self.events:
+                    self.events.record("cache_evict", entry_id=evicted.entry_id)
             self._entries[entry.entry_id] = entry
+            if self.events:
+                self.events.record("cache_insert", entry_id=entry.entry_id)
         return entry
 
     def contains(self, entry_id: str, version: str) -> bool:
@@ -77,6 +87,9 @@ class CacheManager:
             self._entries[entry_id] = CacheEntry(old.entry_id, old.version,
                                                   old.prompt, old.image, profile,
                                                   old.image_embedding)
+            if self.events:
+                self.events.record("profile_publish", entry_id=entry_id,
+                                   min_step=profile.min_step, max_step=profile.max_step)
             return True
 
     def snapshot(self) -> tuple[CacheEntry, ...]:

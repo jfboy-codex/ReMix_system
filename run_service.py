@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import random
 import time
@@ -14,6 +15,9 @@ from pathlib import Path
 
 from remix_system import ReMixRuntime
 from remix_system.data import dataset_prompts
+from remix_system.events import EventLog
+from remix_system.experiment import read_trace, summarize, write_jsonl
+from remix_system.hardware import GpuSampler
 from remix_system.policy import ReMixPolicy
 from remix_system.diffusers_adapters import (
     CLIPScorer, SD15Backend, SD35Backend, SD35VAEDecoder,
@@ -37,6 +41,9 @@ def main() -> None:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--prompts", type=Path, help="JSONL or plain-text prompts")
     source.add_argument("--dataset", choices=("coco", "diffusiondb"))
+    source.add_argument("--trace", type=Path, help="fixed JSONL trace with prompt and arrival_s")
+    parser.add_argument("--mode", choices=("idle-profile", "no-profile"),
+                        default="idle-profile")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--steps", type=int, help="override both model step counts")
     parser.add_argument("--threshold", type=float)
@@ -66,6 +73,9 @@ def main() -> None:
     arrival_rng = random.Random(serving_cfg["seed"])
     if serving_cfg.get("precompute"):
         raise ValueError("server runner requires real miss generation; set precompute: false")
+    if args.trace and args.interarrival_ms is not None:
+        parser.error("--interarrival-ms cannot be used with --trace")
+    profile_enabled = args.mode == "idle-profile"
 
     import torch
     from diffusers import DDIMScheduler, StableDiffusion3Pipeline, StableDiffusionImg2ImgPipeline
@@ -75,17 +85,19 @@ def main() -> None:
     sd15 = StableDiffusionImg2ImgPipeline.from_pretrained(
         small_path, torch_dtype=torch.float16, local_files_only=True).to(small_cfg["device"])
     sd15.scheduler = DDIMScheduler.from_config(sd15.scheduler.config)
-    if not hasattr(sd35, "generate_with_profile"):
+    if profile_enabled and not hasattr(sd35, "generate_with_profile"):
         raise RuntimeError("SD3.5 pipeline lacks the experiment's generate_with_profile patch")
     if not hasattr(sd15, "diffedit_rewrite_soft"):
         raise RuntimeError("SD1.5 pipeline lacks the experiment's diffedit_rewrite_soft patch")
     vae_gpu1 = copy.deepcopy(sd35.vae).to(small_cfg["device"])
     clip = CLIPScorer(clip_path)
+    events = EventLog()
     service = ReMixRuntime(
         SD35Backend(sd35, large_cfg["device"], steps=large_steps,
                     height=large_cfg["height"], width=large_cfg["width"],
                     guidance=large_cfg["guidance_scale"],
-                    seed=serving_cfg["seed"], negative_prompt=large_cfg["negative_prompt"]),
+                    seed=serving_cfg["seed"], negative_prompt=large_cfg["negative_prompt"],
+                    capture_profile=profile_enabled),
         SD15Backend(sd15, small_cfg["device"], steps=small_steps,
                     guidance=small_cfg["guidance_scale"],
                     seed=serving_cfg["seed"], negative_prompt=small_cfg["negative_prompt"]),
@@ -94,42 +106,72 @@ def main() -> None:
         cache_score=clip, profile_score=clip,
         threshold=threshold, capacity=capacity,
         max_pending_profiles=serving_cfg["max_pending_profiles"],
+        profile_enabled=profile_enabled, events=events,
         policy=ReMixPolicy(total_steps=small_steps,
                            fallback_start_step=serving_cfg["fallback_start_step"],
                            hit_threshold=threshold))
 
     output.mkdir(parents=True, exist_ok=True)
+    sampler = GpuSampler((int(large_cfg["device"].split(":")[1]),
+                          int(small_cfg["device"].split(":")[1])),
+                         config["experiment"]["gpu_sample_interval_s"])
+    sampler.start()
     futures = []
     started = time.perf_counter()
     try:
-        source_prompts = (prompts_from(args.prompts) if args.prompts else
-                          dataset_prompts(config, args.dataset))
-        for prompt in source_prompts:
-            if args.interarrival_ms is not None:
-                delay = args.interarrival_ms / 1000
-            elif arrival_cfg["distribution"] == "gamma":
-                delay = arrival_rng.gammavariate(arrival_cfg["shape"], arrival_cfg["scale_s"])
-            else:
-                raise ValueError(f"unsupported arrival distribution: {arrival_cfg['distribution']}")
-            if delay:
-                time.sleep(delay)
-            futures.append((prompt, service.submit(prompt)))
-        results = [(prompt, future.result()) for prompt, future in futures]
+        if args.trace:
+            trace = read_trace(args.trace)
+            for row in trace:
+                delay = started + float(row["arrival_s"]) - time.perf_counter()
+                if delay > 0:
+                    time.sleep(delay)
+                futures.append((row["prompt"], service.submit(row["prompt"]), row))
+        else:
+            source_prompts = (prompts_from(args.prompts) if args.prompts else
+                              dataset_prompts(config, args.dataset))
+            for prompt in source_prompts:
+                if args.interarrival_ms is not None:
+                    delay = args.interarrival_ms / 1000
+                elif arrival_cfg["distribution"] == "gamma":
+                    delay = arrival_rng.gammavariate(arrival_cfg["shape"], arrival_cfg["scale_s"])
+                else:
+                    raise ValueError(f"unsupported arrival distribution: {arrival_cfg['distribution']}")
+                if delay:
+                    time.sleep(delay)
+                futures.append((prompt, service.submit(prompt), None))
+        results = [(prompt, future.result(), meta) for prompt, future, meta in futures]
         responses_finished = time.perf_counter()
     finally:
         drained = service.close(drain_profiles=not args.skip_profile_drain)
+        sampler.stop()
     all_work_finished = time.perf_counter()
 
     images = output / "images"
     images.mkdir(exist_ok=True)
+    clip_scores = []
     with (output / "requests.jsonl").open("w", encoding="utf-8") as out:
-        for prompt, result in results:
+        for prompt, result, meta in results:
             result.image.save(images / f"{result.request_id}.png")
+            score = clip(result.image, prompt)
+            clip_scores.append(score)
             out.write(json.dumps({
                 "request_id": result.request_id, "prompt": prompt,
                 "path": result.path, "end_to_end_s": result.end_to_end_seconds,
+                "clip_score": score,
+                "trace_index": meta.get("index") if meta else None,
+                "trace_kind": meta.get("kind") if meta else None,
             }, ensure_ascii=False) + "\n")
+    events.save(output / "events.jsonl")
+    write_jsonl(output / "gpu_samples.jsonl", sampler.samples)
+    measured, entries = summarize(events.snapshot(), sampler.samples)
+    write_jsonl(output / "cache_entries.jsonl", entries)
     summary = {
+        "mode": args.mode,
+        "trace": str(args.trace) if args.trace else None,
+        "trace_sha256": hashlib.sha256(args.trace.read_bytes()).hexdigest() if args.trace else None,
+        "cache_capacity": capacity,
+        "replacement": "fifo",
+        "mean_output_clip_score": sum(clip_scores) / len(clip_scores) if clip_scores else None,
         "count": len(results),
         "response_window_s": responses_finished - started,
         "throughput_responses_per_s": (len(results) / (responses_finished - started)
@@ -139,6 +181,7 @@ def main() -> None:
         "profiles_pending": service.profiles.pending,
         "profiles_dropped": service.profiles.dropped,
         "profile_errors": [str(error) for _, error in service.profiles.errors],
+        **measured,
     }
     (output / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))

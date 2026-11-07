@@ -38,7 +38,7 @@ serving:
   hit_threshold:
     coco: 0.26
     diffusiondb: 0.26
-  cache_capacity: 100
+  cache_capacity: 200
   max_pending_profiles: 16
   fallback_start_step: 20
   seed: 42
@@ -47,3 +47,19 @@ serving:
 
 output:
   root: outputs
+
+experiment:
+  request_count: 800
+  unique_pool: 400
+  exact_reuses: 200
+  edited_reuses: 200
+  repetitions: 1
+  replacement: fifo
+  loads:
+    low:
+      gamma_shape: 1.0
+      gamma_scale_s: 10.0
+    high:
+      gamma_shape: 1.0
+      gamma_scale_s: 5.0
+  gpu_sample_interval_s: 0.5

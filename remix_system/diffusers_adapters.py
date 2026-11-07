@@ -13,7 +13,8 @@ from .types import EditPlan, Generated, Trace
 class SD35Backend:
     def __init__(self, pipeline: Any, device: str, steps: int = 40,
                  height: int = 1024, width: int = 1024, guidance: float = 5.0,
-                 seed: int = 42, negative_prompt: str = ""):
+                 seed: int = 42, negative_prompt: str = "",
+                 capture_profile: bool = True):
         if not hasattr(pipeline, "generate_with_profile"):
             raise TypeError("SD3.5 pipeline must implement generate_with_profile")
         self.pipeline = pipeline
@@ -24,9 +25,17 @@ class SD35Backend:
         self.guidance = guidance
         self.seed = seed
         self.negative_prompt = negative_prompt
+        self.capture_profile = capture_profile
 
     def generate(self, prompt: str) -> Generated:
         import torch
+        if not self.capture_profile:
+            result = self.pipeline(
+                prompt=prompt, height=self.height, width=self.width,
+                num_inference_steps=self.steps, guidance_scale=self.guidance,
+                negative_prompt=self.negative_prompt,
+                generator=torch.Generator(self.device).manual_seed(self.seed))
+            return Generated(result.images[0])
         image, records, latents = self.pipeline.generate_with_profile(
             prompt=prompt, height=self.height, width=self.width,
             num_inference_steps=self.steps, guidance_scale=self.guidance,

@@ -47,6 +47,7 @@ class EditPlan:
     strength: float
     mask_expand_end: int | None
     repaint_mode: str = "graduated"
+    request_id: str = ""
 
 
 @dataclass(frozen=True)
