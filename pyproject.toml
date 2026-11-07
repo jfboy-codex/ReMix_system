@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "remix-system"
+version = "0.1.0"
+requires-python = ">=3.10"
+description = "Modular ReMix serving and idle-time profiling runtime"
+
+[project.optional-dependencies]
+server = [
+    "torch>=2.0",
+    "diffusers>=0.30",
+    "transformers>=4.40",
+    "accelerate>=0.30",
+    "safetensors>=0.4",
+    "Pillow>=10",
+    "numpy>=1.24",
+    "PyYAML>=6",
+    "pandas>=2",
+    "pyarrow>=12",
+]
+
+[tool.setuptools.packages.find]
+include = ["remix_system*"]
+

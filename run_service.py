@@ -1,0 +1,148 @@
+"""Run the modular ReMix service with the existing patched Diffusers pipelines.
+
+Input: JSONL records with a `prompt` field, or one prompt per line.
+This runner uses real generation and editing, never precomputed miss images.
+"""
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import random
+import time
+from pathlib import Path
+
+from remix_system import ReMixRuntime
+from remix_system.data import dataset_prompts
+from remix_system.policy import ReMixPolicy
+from remix_system.diffusers_adapters import (
+    CLIPScorer, SD15Backend, SD35Backend, SD35VAEDecoder,
+)
+
+
+def prompts_from(path: Path):
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        value = json.loads(line) if line.lstrip().startswith("{") else line
+        yield value["prompt"] if isinstance(value, dict) else str(value)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=Path, default=Path("config/server.yaml"))
+    parser.add_argument("--sd35", help="override local SD3.5 Medium model directory")
+    parser.add_argument("--sd15", help="override local SD1.5 model directory")
+    parser.add_argument("--clip", help="override local CLIP model directory")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--prompts", type=Path, help="JSONL or plain-text prompts")
+    source.add_argument("--dataset", choices=("coco", "diffusiondb"))
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--steps", type=int, help="override both model step counts")
+    parser.add_argument("--threshold", type=float)
+    parser.add_argument("--capacity", type=int)
+    parser.add_argument("--interarrival-ms", type=float,
+                        help="fixed interval override; 0 submits all requests immediately")
+    parser.add_argument("--skip-profile-drain", action="store_true")
+    args = parser.parse_args()
+
+    import yaml
+    config = yaml.safe_load(args.config.read_text(encoding="utf-8"))
+    large_cfg = config["models"]["sd35"]
+    small_cfg = config["models"]["sd15"]
+    serving_cfg = config["serving"]
+    large_path = args.sd35 or large_cfg["path"]
+    small_path = args.sd15 or small_cfg["path"]
+    clip_path = args.clip or config["models"]["clip"]["path"]
+    large_steps = args.steps or large_cfg["steps"]
+    small_steps = args.steps or small_cfg["steps"]
+    threshold = (args.threshold if args.threshold is not None else
+                 serving_cfg["hit_threshold"].get(args.dataset, 0.26))
+    capacity = args.capacity or serving_cfg["cache_capacity"]
+    output = args.output or Path(config["output"]["root"]) / (args.dataset or "prompts")
+    arrival_cfg = serving_cfg["arrival"]
+    if args.interarrival_ms is not None and args.interarrival_ms < 0:
+        parser.error("--interarrival-ms must be nonnegative")
+    arrival_rng = random.Random(serving_cfg["seed"])
+    if serving_cfg.get("precompute"):
+        raise ValueError("server runner requires real miss generation; set precompute: false")
+
+    import torch
+    from diffusers import DDIMScheduler, StableDiffusion3Pipeline, StableDiffusionImg2ImgPipeline
+
+    sd35 = StableDiffusion3Pipeline.from_pretrained(
+        large_path, torch_dtype=torch.float16, local_files_only=True).to(large_cfg["device"])
+    sd15 = StableDiffusionImg2ImgPipeline.from_pretrained(
+        small_path, torch_dtype=torch.float16, local_files_only=True).to(small_cfg["device"])
+    sd15.scheduler = DDIMScheduler.from_config(sd15.scheduler.config)
+    if not hasattr(sd35, "generate_with_profile"):
+        raise RuntimeError("SD3.5 pipeline lacks the experiment's generate_with_profile patch")
+    if not hasattr(sd15, "diffedit_rewrite_soft"):
+        raise RuntimeError("SD1.5 pipeline lacks the experiment's diffedit_rewrite_soft patch")
+    vae_gpu1 = copy.deepcopy(sd35.vae).to(small_cfg["device"])
+    clip = CLIPScorer(clip_path)
+    service = ReMixRuntime(
+        SD35Backend(sd35, large_cfg["device"], steps=large_steps,
+                    height=large_cfg["height"], width=large_cfg["width"],
+                    guidance=large_cfg["guidance_scale"],
+                    seed=serving_cfg["seed"], negative_prompt=large_cfg["negative_prompt"]),
+        SD15Backend(sd15, small_cfg["device"], steps=small_steps,
+                    guidance=small_cfg["guidance_scale"],
+                    seed=serving_cfg["seed"], negative_prompt=small_cfg["negative_prompt"]),
+        SD35VAEDecoder(sd35.vae, large_cfg["device"]),
+        SD35VAEDecoder(vae_gpu1, small_cfg["device"]),
+        cache_score=clip, profile_score=clip,
+        threshold=threshold, capacity=capacity,
+        max_pending_profiles=serving_cfg["max_pending_profiles"],
+        policy=ReMixPolicy(total_steps=small_steps,
+                           fallback_start_step=serving_cfg["fallback_start_step"],
+                           hit_threshold=threshold))
+
+    output.mkdir(parents=True, exist_ok=True)
+    futures = []
+    started = time.perf_counter()
+    try:
+        source_prompts = (prompts_from(args.prompts) if args.prompts else
+                          dataset_prompts(config, args.dataset))
+        for prompt in source_prompts:
+            if args.interarrival_ms is not None:
+                delay = args.interarrival_ms / 1000
+            elif arrival_cfg["distribution"] == "gamma":
+                delay = arrival_rng.gammavariate(arrival_cfg["shape"], arrival_cfg["scale_s"])
+            else:
+                raise ValueError(f"unsupported arrival distribution: {arrival_cfg['distribution']}")
+            if delay:
+                time.sleep(delay)
+            futures.append((prompt, service.submit(prompt)))
+        results = [(prompt, future.result()) for prompt, future in futures]
+        responses_finished = time.perf_counter()
+    finally:
+        drained = service.close(drain_profiles=not args.skip_profile_drain)
+    all_work_finished = time.perf_counter()
+
+    images = output / "images"
+    images.mkdir(exist_ok=True)
+    with (output / "requests.jsonl").open("w", encoding="utf-8") as out:
+        for prompt, result in results:
+            result.image.save(images / f"{result.request_id}.png")
+            out.write(json.dumps({
+                "request_id": result.request_id, "prompt": prompt,
+                "path": result.path, "end_to_end_s": result.end_to_end_seconds,
+            }, ensure_ascii=False) + "\n")
+    summary = {
+        "count": len(results),
+        "response_window_s": responses_finished - started,
+        "throughput_responses_per_s": (len(results) / (responses_finished - started)
+                                       if responses_finished > started else 0),
+        "all_work_window_s": all_work_finished - started,
+        "profiles_drained": drained,
+        "profiles_pending": service.profiles.pending,
+        "profiles_dropped": service.profiles.dropped,
+        "profile_errors": [str(error) for _, error in service.profiles.errors],
+    }
+    (output / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(json.dumps(summary, indent=2))
+
+
+if __name__ == "__main__":
+    main()

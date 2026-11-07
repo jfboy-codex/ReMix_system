@@ -1,0 +1,49 @@
+models:
+  sd35:
+    path: /home/dataset-assist-0/models/stable-diffusion-3.5-medium
+    device: cuda:0
+    width: 1024
+    height: 1024
+    steps: 40
+    guidance_scale: 5.0
+    negative_prompt: "low quality, blurry, distorted, ugly, bad anatomy, watermark, text"
+  sd15:
+    path: /home/dataset-assist-0/models/stable-diffusion-v1-5
+    device: cuda:1
+    width: 512
+    height: 512
+    steps: 40
+    guidance_scale: 7.5
+    negative_prompt: "low quality, blurry, distorted, ugly"
+  clip:
+    path: /home/dataset-assist-0/models/clip-vit-base-patch32
+
+datasets:
+  root: /home/dataset-assist-0/data
+  coco:
+    path: coco_caption
+    split: val
+    num_samples: 400
+    seed: 42
+  diffusiondb:
+    path: diffusiondb_10k
+    num_samples: 400
+    seed: 42
+
+serving:
+  arrival:
+    distribution: gamma
+    shape: 1.0
+    scale_s: 1.0
+  hit_threshold:
+    coco: 0.26
+    diffusiondb: 0.26
+  cache_capacity: 100
+  max_pending_profiles: 16
+  fallback_start_step: 20
+  seed: 42
+  # Full SD3.5 generation and online profiling are required for serving measurements.
+  precompute: false
+
+output:
+  root: outputs
