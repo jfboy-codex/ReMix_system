@@ -15,44 +15,21 @@ def make_trace(config: dict, dataset: str, load: str) -> list[dict]:
     spec = config["experiment"]
     if spec["replacement"].lower() != "fifo":
         raise ValueError("only FIFO is supported")
-    workload = spec["workload"]
-    source_count = workload["source_prompts"]
-    initial_count = workload["initial_prompts"]
-    exact_count = workload["exact_reuses"]
-    edited_count = workload["edited_reuses"]
-    if (not all(isinstance(n, int) for n in (source_count, initial_count,
-                                             exact_count, edited_count))
-            or source_count <= 0 or not 1 <= initial_count <= source_count
-            or exact_count < 0 or edited_count < 0):
-        raise ValueError("invalid experiment.workload prompt counts")
-    request_count = source_count + exact_count + edited_count
-    base = list(dataset_prompts(config, dataset))
-    if len(base) < source_count:
-        raise ValueError(f"need {source_count} source prompts, got {len(base)}")
-    base = base[:source_count]
-    initial = [{"prompt": p, "kind": "initial", "source_index": i}
-               for i, p in enumerate(base[:initial_count])]
-    tail = [{"prompt": p, "kind": "new", "source_index": i}
-            for i, p in enumerate(base[initial_count:], start=initial_count)]
+    request_count = spec["request_count"]
+    if not isinstance(request_count, int) or request_count <= 0:
+        raise ValueError("experiment.request_count must be a positive integer")
+    prompts = list(dataset_prompts(config, dataset))
+    if len(prompts) < request_count:
+        raise ValueError(f"need {request_count} dataset prompts, got {len(prompts)}")
     rng = random.Random(config["serving"]["seed"])
-    for i in range(exact_count):
-        source = i % initial_count
-        tail.append({"prompt": base[source], "kind": "exact", "source_index": source})
-    suffixes = (" in watercolor style", " at sunset")
-    for i in range(edited_count):
-        source = i % initial_count
-        tail.append({"prompt": base[source] + suffixes[i % len(suffixes)],
-                     "kind": "edited", "source_index": source})
-    rng.shuffle(tail)
     arrival = config["experiment"]["loads"][load]
     if arrival["gamma_shape"] <= 0 or arrival["gamma_scale_s"] <= 0:
         raise ValueError("Gamma shape and scale must be positive")
     elapsed = 0.0
     trace = []
-    for index, item in enumerate(initial + tail):
+    for index, prompt in enumerate(prompts[:request_count]):
         elapsed += rng.gammavariate(arrival["gamma_shape"], arrival["gamma_scale_s"])
-        trace.append({"index": index, "arrival_s": elapsed, **item})
-    assert len(trace) == request_count
+        trace.append({"index": index, "arrival_s": elapsed, "prompt": prompt})
     return trace
 
 

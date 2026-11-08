@@ -9,37 +9,36 @@ class ExperimentTests(unittest.TestCase):
         config = {
             "datasets": {}, "serving": {"seed": 42},
             "experiment": {"replacement": "fifo",
-                           "workload": {"source_prompts": 200, "initial_prompts": 100,
-                                        "exact_reuses": 100, "edited_reuses": 100},
+                           "request_count": 400,
                            "loads": {"low": {"gamma_shape": 1, "gamma_scale_s": 5}}},
         }
         with patch("remix_system.experiment.dataset_prompts",
-                   return_value=iter(f"prompt {i}" for i in range(200))):
+                   return_value=iter(f"prompt {i}" for i in range(400))):
             first = make_trace(config, "coco", "low")
         with patch("remix_system.experiment.dataset_prompts",
-                   return_value=iter(f"prompt {i}" for i in range(200))):
+                   return_value=iter(f"prompt {i}" for i in range(400))):
             second = make_trace(config, "coco", "low")
         self.assertEqual(first, second)
         self.assertEqual(len(first), 400)
-        self.assertEqual({k: sum(r["kind"] == k for r in first)
-                          for k in ("initial", "new", "exact", "edited")},
-                         {"initial": 100, "new": 100, "exact": 100, "edited": 100})
+        self.assertEqual([row["prompt"] for row in first],
+                         [f"prompt {i}" for i in range(400)])
+        self.assertTrue(all(set(row) == {"index", "arrival_s", "prompt"}
+                            for row in first))
         self.assertTrue(all(b["arrival_s"] > a["arrival_s"]
                             for a, b in zip(first, first[1:])))
 
-    def test_request_count_is_derived_from_workload(self):
+    def test_request_count_limits_dataset_rows(self):
         config = {
             "datasets": {}, "serving": {"seed": 42},
             "experiment": {"replacement": "fifo",
-                           "workload": {"source_prompts": 5, "initial_prompts": 2,
-                                        "exact_reuses": 1, "edited_reuses": 1},
+                           "request_count": 5,
                            "loads": {"low": {"gamma_shape": 1, "gamma_scale_s": 1}}},
         }
         with patch("remix_system.experiment.dataset_prompts",
-                   return_value=iter(f"prompt {i}" for i in range(5))):
+                   return_value=iter(f"prompt {i}" for i in range(7))):
             trace = make_trace(config, "coco", "low")
-        self.assertEqual(len(trace), 7)
-        self.assertEqual(sum(row["kind"] == "new" for row in trace), 3)
+        self.assertEqual([row["prompt"] for row in trace],
+                         [f"prompt {i}" for i in range(5)])
 
     def test_summary_counts_reuse_and_profile_overlap(self):
         events = [

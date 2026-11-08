@@ -54,11 +54,7 @@ output:
   root: outputs
 
 experiment:
-  workload:
-    source_prompts: 200
-    initial_prompts: 100
-    exact_reuses: 100
-    edited_reuses: 100
+  request_count: 400
   repetitions: 1
   replacement: fifo
   loads:

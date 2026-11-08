@@ -9,9 +9,9 @@ def dataset_prompts(config: dict, name: str):
     import pandas as pd
 
     spec = config["datasets"][name]
-    limit = config["experiment"]["workload"]["source_prompts"]
+    limit = config["experiment"]["request_count"]
     if not isinstance(limit, int) or limit <= 0:
-        raise ValueError("experiment.workload.source_prompts must be a positive integer")
+        raise ValueError("experiment.request_count must be a positive integer")
     data_dir = Path(config["datasets"]["root"]) / spec["path"] / "data"
     pattern = f'{spec.get("split", "val")}-*.parquet' if name == "coco" else "*.parquet"
     files = sorted(data_dir.glob(pattern))

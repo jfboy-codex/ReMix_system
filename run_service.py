@@ -196,7 +196,6 @@ def main() -> None:
                 "path": result.path, "end_to_end_s": result.end_to_end_seconds,
                 "clip_score": score,
                 "trace_index": meta.get("index") if meta else None,
-                "trace_kind": meta.get("kind") if meta else None,
             }, ensure_ascii=False) + "\n")
     events.save(output / "events.jsonl")
     write_jsonl(output / "gpu_samples.jsonl", sampler.samples)
