@@ -20,19 +20,10 @@ Two Gamma(shape=1) arrival loads are specified in `config/server.yaml`: mean int
 
 ```bash
 python -m pip install -e '.[server]'
-for dataset in coco diffusiondb; do
-  for load in low high; do
-    python prepare_trace.py --dataset "$dataset" --load "$load" \
-      --output "traces/${dataset}_${load}.jsonl"
-    for mode in no-profile idle-profile; do
-      python run_service.py --trace "traces/${dataset}_${load}.jsonl" \
-        --mode "$mode" --output "outputs/experiment/${dataset}_${load}_${mode}"
-      python evaluate_pickscore.py \
-        --output "outputs/experiment/${dataset}_${load}_${mode}"
-    done
-  done
-done
+bash run_experiment.sh
 ```
+
+The script generates four traces, runs both modes for each dataset/load combination in separate Python processes, and evaluates PickScore after each serving run. It writes console logs into each run directory and stops on errors. Use `bash run_experiment.sh --resume` after an interrupted run; completed results are reused only if their recorded trace SHA-256 still matches the regenerated trace. Set `PYTHON_BIN`, `REMIX_CONFIG`, `REMIX_TRACE_ROOT`, or `REMIX_RUN_ROOT` in the environment to override the defaults. Run the long experiment inside `tmux` or an equivalent persistent session.
 
 The trace SHA-256 in each run's `summary.json` must match between paired modes. Run each mode in a fresh process so the cache begins empty. Do not use `--skip-profile-drain` for the main experiment. Keep the original trace files with results.
 

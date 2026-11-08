@@ -47,6 +47,7 @@ The two workers must not share one VAE object across devices. Set `policy=ReMixP
 ## Verification
 
 For the reviewer-facing paired profiling experiment (800 requests, FIFO capacity 200, one run per configuration), see [EXPERIMENT_PLAN.md](EXPERIMENT_PLAN.md). Generate a fixed trace with `prepare_trace.py`, then pass it to `run_service.py --trace ... --mode no-profile|idle-profile`. The driver records request, profile, cache, GPU utilization, memory, and output CLIP data in the output directory.
+After installing `.[server]`, `bash run_experiment.sh` runs the full matrix; `bash run_experiment.sh --resume` continues after an interruption and checks trace hashes before keeping finished results.
 The `experiment.workload` block is the only source for prompt counts: 400 source prompts plus 200 exact and 200 edited reuses produce 800 requests. `serving.cache_capacity: 200` is an independent limit on resident cache entries.
 Run `evaluate_pickscore.py --output <run-directory>` after serving to score generated images with the old experiment's local PickScore model without affecting latency measurements.
 
