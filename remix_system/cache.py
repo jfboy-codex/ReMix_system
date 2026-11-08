@@ -96,3 +96,8 @@ class CacheManager:
         with self._lock:
             return tuple(self._entries.values())
 
+    @property
+    def size(self) -> int:
+        with self._lock:
+            return len(self._entries)
+

@@ -21,6 +21,7 @@ server = [
     "pandas>=2",
     "pyarrow>=12",
     "nvidia-ml-py>=12",
+    "tqdm>=4.66",
 ]
 
 [tool.setuptools.packages.find]

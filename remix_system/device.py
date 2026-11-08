@@ -89,3 +89,8 @@ class DeviceManager:
     def wait_foreground(self) -> None:
         self._front.join()
 
+    @property
+    def queued_foreground(self) -> int:
+        """Number of foreground requests waiting, excluding the active request."""
+        return self._front.qsize()
+

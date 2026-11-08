@@ -10,6 +10,7 @@ import copy
 import hashlib
 import json
 import random
+import threading
 import time
 from pathlib import Path
 
@@ -79,11 +80,14 @@ def main() -> None:
 
     import torch
     from diffusers import DDIMScheduler, StableDiffusion3Pipeline, StableDiffusionImg2ImgPipeline
+    from tqdm import tqdm
 
     sd35 = StableDiffusion3Pipeline.from_pretrained(
         large_path, torch_dtype=torch.float16, local_files_only=True).to(large_cfg["device"])
     sd15 = StableDiffusionImg2ImgPipeline.from_pretrained(
         small_path, torch_dtype=torch.float16, local_files_only=True).to(small_cfg["device"])
+    sd35.set_progress_bar_config(disable=True)
+    sd15.set_progress_bar_config(disable=True)
     sd15.scheduler = DDIMScheduler.from_config(sd15.scheduler.config)
     if profile_enabled and not hasattr(sd35, "generate_with_profile"):
         raise RuntimeError("SD3.5 pipeline lacks the experiment's generate_with_profile patch")
@@ -115,6 +119,11 @@ def main() -> None:
                            fallback_start_step=serving_cfg["fallback_start_step"],
                            hit_threshold=threshold))
 
+    trace = read_trace(args.trace) if args.trace else None
+    source_prompts = (None if trace is not None else list(
+        prompts_from(args.prompts) if args.prompts else dataset_prompts(config, args.dataset)))
+    total_requests = len(trace) if trace is not None else len(source_prompts)
+
     output.mkdir(parents=True, exist_ok=True)
     sampler = GpuSampler((int(large_cfg["device"].split(":")[1]),
                           int(small_cfg["device"].split(":")[1])),
@@ -122,17 +131,37 @@ def main() -> None:
     sampler.start()
     futures = []
     started = time.perf_counter()
+    progress = tqdm(total=total_requests, desc="Requests", unit="req",
+                    dynamic_ncols=True, mininterval=1.0)
+    progress_lock = threading.Lock()
+    last_refresh = 0.0
+
+    def update_progress(completed: bool = False) -> None:
+        nonlocal last_refresh
+        with progress_lock:
+            progress.set_postfix_str(
+                f"sd35_q={service.large.queued_foreground} "
+                f"sd15_q={service.small.queued_foreground} "
+                f"cache={service.cache.size}/{capacity}", refresh=False)
+            if completed:
+                progress.update(1)
+            now = time.perf_counter()
+            if now - last_refresh >= 1.0:
+                progress.refresh()
+                last_refresh = now
+
+    update_progress()
     try:
-        if args.trace:
-            trace = read_trace(args.trace)
+        if trace is not None:
             for row in trace:
                 delay = started + float(row["arrival_s"]) - time.perf_counter()
                 if delay > 0:
                     time.sleep(delay)
-                futures.append((row["prompt"], service.submit(row["prompt"]), row))
+                future = service.submit(row["prompt"])
+                future.add_done_callback(lambda _future: update_progress(completed=True))
+                futures.append((row["prompt"], future, row))
+                update_progress()
         else:
-            source_prompts = (prompts_from(args.prompts) if args.prompts else
-                              dataset_prompts(config, args.dataset))
             for prompt in source_prompts:
                 if args.interarrival_ms is not None:
                     delay = args.interarrival_ms / 1000
@@ -142,12 +171,16 @@ def main() -> None:
                     raise ValueError(f"unsupported arrival distribution: {arrival_cfg['distribution']}")
                 if delay:
                     time.sleep(delay)
-                futures.append((prompt, service.submit(prompt), None))
+                future = service.submit(prompt)
+                future.add_done_callback(lambda _future: update_progress(completed=True))
+                futures.append((prompt, future, None))
+                update_progress()
         results = [(prompt, future.result(), meta) for prompt, future, meta in futures]
         responses_finished = time.perf_counter()
     finally:
         drained = service.close(drain_profiles=not args.skip_profile_drain)
         sampler.stop()
+        progress.close()
     all_work_finished = time.perf_counter()
 
     images = output / "images"
