@@ -16,7 +16,7 @@ The event log records coarse and fine step indices and counts; compare them with
 
 For each of COCO and DiffusionDB, read the first 400 prompts using the old Parquet conventions. All workload counts are defined once in `experiment.workload`: `source_prompts=400`, `initial_prompts=200`, `exact_reuses=200`, and `edited_reuses=200`. The remaining 200 source prompts become later new requests. The total is derived as `source_prompts + exact_reuses + edited_reuses = 800`; dataset entries contain only location and reading settings. The last 600 requests are shuffled with seed 42. Exact and edited repeats are *offered* reuse opportunities; the actual cache hit rate is measured, not assumed. FIFO eviction is deliberately exercised. One trace is generated for each dataset and load and reused unchanged in both modes.
 
-Two Gamma(shape=1) arrival loads are specified in `config/server.yaml`: mean intervals 10 s (low) and 5 s (high). These are starting points based on the one-request smoke test; inspect a short pilot for saturation before the full matrix, then freeze the rates and regenerate traces if needed. Each of the 2 datasets × 2 loads × 2 modes is run **once**. There is no three-run repetition.
+Two Gamma(shape=1) arrival loads are specified in `config/server.yaml`: mean intervals 5 s (low, 0.2 QPS) and 2 s (high, 0.5 QPS). Each of the 2 datasets × 2 loads × 2 modes is run **once**. There is no three-run repetition.
 
 ```bash
 python -m pip install -e '.[server]'

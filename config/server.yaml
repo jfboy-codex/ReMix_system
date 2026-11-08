@@ -64,8 +64,8 @@ experiment:
   loads:
     low:
       gamma_shape: 1.0
-      gamma_scale_s: 10.0
+      gamma_scale_s: 5.0
     high:
       gamma_shape: 1.0
-      gamma_scale_s: 5.0
+      gamma_scale_s: 2.0
   gpu_sample_interval_s: 0.5
