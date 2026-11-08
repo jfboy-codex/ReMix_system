@@ -58,12 +58,12 @@ class ProfileCoordinator:
         self.dropped = 0
         self._jobs: dict[str, ProfileJob] = {}
         self._ready: deque[str] = deque()
-        self._cpu_queue: queue.Queue[tuple[str, Any] | None] = queue.Queue()
+        self._score_queue: queue.Queue[tuple[str, Any] | None] = queue.Queue()
         self._lock = threading.RLock()
         self._changed = threading.Condition(self._lock)
         self.errors: list[tuple[str, Exception]] = []
-        self._cpu_thread = threading.Thread(target=self._score_loop, name="profile-cpu", daemon=True)
-        self._cpu_thread.start()
+        self._score_thread = threading.Thread(target=self._score_loop, name="profile-score", daemon=True)
+        self._score_thread.start()
 
     def enqueue(self, entry: CacheEntry, trace: Trace) -> str | None:
         if not trace.latents:
@@ -137,7 +137,7 @@ class ProfileCoordinator:
             if job is None or job.state != "decoding":
                 return
             job.state = "scoring"
-        self._cpu_queue.put((job_id, image))
+        self._score_queue.put((job_id, image))
 
     def failed(self, job_id: str, error: Exception) -> None:
         with self._changed:
@@ -181,7 +181,7 @@ class ProfileCoordinator:
 
     def _score_loop(self) -> None:
         while True:
-            item = self._cpu_queue.get()
+            item = self._score_queue.get()
             if item is None:
                 return
             job_id, image = item
@@ -255,6 +255,6 @@ class ProfileCoordinator:
             return len(self._jobs)
 
     def close(self) -> None:
-        self._cpu_queue.put(None)
-        self._cpu_thread.join()
+        self._score_queue.put(None)
+        self._score_thread.join()
 

@@ -1,6 +1,6 @@
 # ReMix diffusion system
 
-This repository implements the request-serving architecture discussed for ReMix. One `DeviceManager` runs on each GPU. Each manager handles foreground requests first and, when idle, claims one latent-decoding chunk from a shared profile coordinator. The CPU scorer checks whether the per-entry CLIP curve has stabilized and either requeues the next chunk or publishes a complete profile. A foreground arrival waits for the already-started decode chunk; GPU kernels are not forcibly preempted.
+This repository implements the request-serving architecture discussed for ReMix. One `DeviceManager` runs on each GPU. Each manager handles foreground requests first and, when idle, claims one latent-decoding chunk from a shared profile coordinator. A scoring thread uses a CLIP model resident on GPU1 to check the per-entry curve and either requeues the next chunk or publishes a complete profile. GPU1 CLIP scoring, SD1.5 editing, and profile decoding share an execution lock; a foreground arrival waits for already-started work, and GPU kernels are not forcibly preempted.
 
 ## Components
 
@@ -9,7 +9,7 @@ This repository implements the request-serving architecture discussed for ReMix.
 | `remix_system.runtime` | Route hit/miss requests and own lifecycle |
 | `remix_system.cache` | Search, FIFO eviction, versioned atomic profile publication |
 | `remix_system.device` | One per GPU; foreground-first scheduling |
-| `remix_system.profiling` | Single owner of profile progress, CPU scoring and resumption |
+| `remix_system.profiling` | Single owner of profile progress, GPU CLIP scoring and resumption |
 | `remix_system.policy` | Per-entry step selection and repaint plan |
 | `remix_system.workers` | Thin large/small model and decoder boundaries |
 | `remix_system.diffusers_adapters` | Optional adapters for the existing patched diffusion pipelines |
@@ -28,12 +28,14 @@ from remix_system.diffusers_adapters import (
 
 # sd35 and sd15 are already-loaded patched pipelines on cuda:0 and cuda:1.
 # sd35_vae_gpu1 is a separate SD3.5 VAE copy resident on cuda:1.
-clip = CLIPScorer("/path/to/clip-vit-base-patch32")
+from threading import Lock
+gpu1_lock = Lock()
+clip = CLIPScorer("/path/to/clip-vit-base-patch32", "cuda:1", gpu1_lock)
 service = ReMixRuntime(
     SD35Backend(sd35, "cuda:0"),
-    SD15Backend(sd15, "cuda:1"),
+    SD15Backend(sd15, "cuda:1", device_lock=gpu1_lock),
     SD35VAEDecoder(sd35.vae, "cuda:0"),
-    SD35VAEDecoder(sd35_vae_gpu1, "cuda:1"),
+    SD35VAEDecoder(sd35_vae_gpu1, "cuda:1", device_lock=gpu1_lock),
     cache_score=clip, profile_score=clip,
 )
 try:
@@ -53,7 +55,7 @@ Run `evaluate_pickscore.py --output <run-directory>` after serving to score gene
 
 Run `python -B -m unittest discover -s tests -v`. The tests use deterministic fake backends to check miss-to-profile-to-hit flow, invalidation after cache eviction, foreground priority between profile chunks, and gap-responsive step selection. They do not measure image quality or GPU performance.
 
-`config/server.yaml` carries the validated server paths and generation settings from `expriment_aaai/config.yaml`: SD3.5 Medium at `/home/dataset-assist-0/models/stable-diffusion-3.5-medium` on `cuda:0`, SD1.5 at `/home/dataset-assist-0/models/stable-diffusion-v1-5` on `cuda:1`, and CLIP ViT-B/32 at `/home/dataset-assist-0/models/clip-vit-base-patch32` on CPU. Both models use 40 steps; the guidance scales are 5.0 and 7.5. COCO captions come from `/home/dataset-assist-0/data/coco_caption/data/val-*.parquet`, and DiffusionDB prompts from `/home/dataset-assist-0/data/diffusiondb_10k/data/*.parquet`. Each source reads the first 400 usable rows; COCO caption selection uses seed 42. The reviewer experiment uses FIFO capacity 200 and threshold 0.26. The old `hds_soft_edit` baseline used capacity 100 and `alpha=1`; the threshold is therefore applied to cached-image versus query-text CLIP cosine similarity, as in this implementation.
+`config/server.yaml` carries the validated server paths and generation settings from `expriment_aaai/config.yaml`: SD3.5 Medium at `/home/dataset-assist-0/models/stable-diffusion-3.5-medium` on `cuda:0`, SD1.5 at `/home/dataset-assist-0/models/stable-diffusion-v1-5` on `cuda:1`, and CLIP ViT-B/32 at `/home/dataset-assist-0/models/clip-vit-base-patch32` on `cuda:1`. Both models use 40 steps; the guidance scales are 5.0 and 7.5. COCO captions come from `/home/dataset-assist-0/data/coco_caption/data/val-*.parquet`, and DiffusionDB prompts from `/home/dataset-assist-0/data/diffusiondb_10k/data/*.parquet`. Each source reads the first 400 usable rows; COCO caption selection uses seed 42. The reviewer experiment uses FIFO capacity 200 and threshold 0.26. The old `hds_soft_edit` baseline used capacity 100 and `alpha=1`; the threshold is therefore applied to cached-image versus query-text CLIP cosine similarity, as in this implementation.
 
 On the server, install this package's server dependencies and apply the existing experiment's patched Diffusers pipelines. The patched SD1.5 pipeline imports `src.mask_algo`; this repository now supplies the compatible `ExpandingMask` implementation, so the experiment repository does not need to remain on `PYTHONPATH`. The pipeline patches are supplied by `expriment_aaai/install_hds_pipeline.sh`; the model and dataset weights are not part of this repository. Then run from this repository root:
 

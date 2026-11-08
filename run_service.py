@@ -61,7 +61,11 @@ def main() -> None:
     serving_cfg = config["serving"]
     large_path = args.sd35 or large_cfg["path"]
     small_path = args.sd15 or small_cfg["path"]
-    clip_path = args.clip or config["models"]["clip"]["path"]
+    clip_cfg = config["models"]["clip"]
+    clip_path = args.clip or clip_cfg["path"]
+    clip_device = clip_cfg["device"]
+    if clip_device != small_cfg["device"]:
+        raise ValueError("CLIP must share the SD1.5 GPU for serialized execution")
     large_steps = args.steps or large_cfg["steps"]
     small_steps = args.steps or small_cfg["steps"]
     threshold = (args.threshold if args.threshold is not None else
@@ -98,7 +102,8 @@ def main() -> None:
     if not hasattr(sd15, "diffedit_rewrite_soft"):
         raise RuntimeError("SD1.5 pipeline lacks the experiment's diffedit_rewrite_soft patch")
     vae_gpu1 = copy.deepcopy(sd35.vae).to(small_cfg["device"])
-    clip = CLIPScorer(clip_path)
+    gpu1_lock = threading.Lock()
+    clip = CLIPScorer(clip_path, device=clip_device, device_lock=gpu1_lock)
     events = EventLog()
     service = ReMixRuntime(
         SD35Backend(sd35, large_cfg["device"], steps=large_steps,
@@ -108,9 +113,10 @@ def main() -> None:
                     capture_profile=profile_enabled),
         SD15Backend(sd15, small_cfg["device"], steps=small_steps,
                     guidance=small_cfg["guidance_scale"],
-                    seed=serving_cfg["seed"], negative_prompt=small_cfg["negative_prompt"]),
+                    seed=serving_cfg["seed"], negative_prompt=small_cfg["negative_prompt"],
+                    device_lock=gpu1_lock),
         SD35VAEDecoder(sd35.vae, large_cfg["device"]),
-        SD35VAEDecoder(vae_gpu1, small_cfg["device"]),
+        SD35VAEDecoder(vae_gpu1, small_cfg["device"], device_lock=gpu1_lock),
         cache_score=clip, profile_score=clip,
         threshold=threshold, capacity=capacity,
         max_pending_profiles=serving_cfg["max_pending_profiles"],
@@ -217,6 +223,7 @@ def main() -> None:
         "trace_sha256": hashlib.sha256(args.trace.read_bytes()).hexdigest() if args.trace else None,
         "cache_capacity": capacity,
         "replacement": "fifo",
+        "clip_device": clip_device,
         "mean_output_clip_score": sum(clip_scores) / len(clip_scores) if clip_scores else None,
         "count": len(results),
         "response_window_s": responses_finished - started,

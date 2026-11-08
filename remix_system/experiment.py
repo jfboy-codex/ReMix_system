@@ -61,7 +61,7 @@ def summarize(events: list[dict], samples: list[dict]) -> tuple[dict, list[dict]
     entries: dict[str, dict] = {}
     arrivals, starts, dones, routes = {}, {}, {}, {}
     profile_gpu = defaultdict(float)
-    profile_cpu = 0.0
+    profile_score_wall = 0.0
     profile_counts = defaultdict(int)
     coarse_scores = 0
     fine_scores = 0
@@ -105,7 +105,7 @@ def summarize(events: list[dict], samples: list[dict]) -> tuple[dict, list[dict]
         elif kind == "profile_decode_start":
             active_profiles[(event["device"], event["job_id"])] = event["t"]
         elif kind == "profile_score":
-            profile_cpu += event["duration_s"]
+            profile_score_wall += event["duration_s"]
         if kind in ("profile_enqueue", "profile_complete", "profile_cancel", "profile_drop", "profile_error"):
             profile_counts[kind] += 1
         if kind == "profile_complete":
@@ -162,7 +162,7 @@ def summarize(events: list[dict], samples: list[dict]) -> tuple[dict, list[dict]
         "profile_overlap_other_gpu_foreground_s": overlap,
         "profile_overlap_fraction": (overlap / total_profile_window
                                      if total_profile_window else None),
-        "profile_cpu_score_wall_s": profile_cpu,
+        "profile_score_wall_s": profile_score_wall,
         "gpu": gpu,
     }
     return summary, list(entries.values())

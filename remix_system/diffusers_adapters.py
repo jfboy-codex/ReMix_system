@@ -5,6 +5,8 @@ the project's generate_with_profile and diffedit_rewrite_soft pipeline methods.
 """
 from __future__ import annotations
 
+import builtins
+from contextlib import nullcontext
 from typing import Any
 
 from .types import EditPlan, Generated, Trace
@@ -26,6 +28,19 @@ class SD35Backend:
         self.seed = seed
         self.negative_prompt = negative_prompt
         self.capture_profile = capture_profile
+        # The patched Diffusers method prints one timing line per SD3.5 miss.
+        # Filter that line in its module without muting other process output.
+        method = getattr(pipeline.generate_with_profile, "__func__",
+                         pipeline.generate_with_profile)
+        namespace = method.__globals__
+        current_print = namespace.get("print", builtins.print)
+        if not getattr(current_print, "_remix_quiet_hds", False):
+            def quiet_print(*args, **kwargs):
+                if args and isinstance(args[0], str) and "[HDS inference]" in args[0]:
+                    return None
+                return current_print(*args, **kwargs)
+            quiet_print._remix_quiet_hds = True
+            namespace["print"] = quiet_print
 
     def generate(self, prompt: str) -> Generated:
         import torch
@@ -48,7 +63,7 @@ class SD35Backend:
 class SD15Backend:
     def __init__(self, pipeline: Any, device: str, steps: int = 40,
                  guidance: float = 7.5, seed: int = 42,
-                 negative_prompt: str = ""):
+                 negative_prompt: str = "", device_lock: Any = None):
         if not hasattr(pipeline, "diffedit_rewrite_soft"):
             raise TypeError("SD1.5 pipeline must implement diffedit_rewrite_soft")
         self.pipeline = pipeline
@@ -57,8 +72,13 @@ class SD15Backend:
         self.guidance = guidance
         self.seed = seed
         self.negative_prompt = negative_prompt
+        self._device_lock = device_lock or nullcontext()
 
     def edit(self, plan: EditPlan) -> Any:
+        with self._device_lock:
+            return self._edit(plan)
+
+    def _edit(self, plan: EditPlan) -> Any:
         import torch
         generator = torch.Generator(self.device).manual_seed(self.seed)
         if plan.repaint_mode == "graduated" and plan.source_prompt != plan.target_prompt:
@@ -80,11 +100,16 @@ class SD15Backend:
 
 
 class SD35VAEDecoder:
-    def __init__(self, vae: Any, device: str):
+    def __init__(self, vae: Any, device: str, device_lock: Any = None):
         self.vae = vae
         self.device = device
+        self._device_lock = device_lock or nullcontext()
 
     def decode(self, latent: Any) -> Any:
+        with self._device_lock:
+            return self._decode(latent)
+
+    def _decode(self, latent: Any) -> Any:
         import numpy as np
         import torch
         from PIL import Image
@@ -97,14 +122,16 @@ class SD35VAEDecoder:
 
 
 class CLIPScorer:
-    """Thread-safe CPU scorer shared by cache lookup and profile scoring."""
+    """Resident scorer shared by cache lookup and profile scoring."""
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, device: str = "cpu", device_lock: Any = None):
         import threading
         from transformers import CLIPModel, CLIPProcessor
-        self.model = CLIPModel.from_pretrained(model_path, local_files_only=True).eval()
+        self.device = device
+        self.model = CLIPModel.from_pretrained(
+            model_path, local_files_only=True).to(device).eval()
         self.processor = CLIPProcessor.from_pretrained(model_path, local_files_only=True)
-        self._lock = threading.Lock()
+        self._lock = device_lock or threading.Lock()
 
     def __call__(self, image: Any, prompt: str) -> float:
         return float(sum(a * b for a, b in zip(self.encode_image(image),
@@ -115,19 +142,21 @@ class CLIPScorer:
         with self._lock, torch.inference_mode():
             data = self.processor(text=prompt, return_tensors="pt", padding=True,
                                   truncation=True, max_length=77)
+            data = {key: value.to(self.device) for key, value in data.items()}
             value = self.model.get_text_features(**data)
             if not isinstance(value, torch.Tensor):
                 value = value.pooler_output if hasattr(value, "pooler_output") else value[0]
             value = value / value.norm(dim=-1, keepdim=True)
-            return tuple(float(x) for x in value[0])
+            return tuple(value[0].float().cpu().tolist())
 
     def encode_image(self, image: Any) -> tuple[float, ...]:
         import torch
         with self._lock, torch.inference_mode():
             data = self.processor(images=image, return_tensors="pt")
+            data = {key: value.to(self.device) for key, value in data.items()}
             value = self.model.get_image_features(**data)
             if not isinstance(value, torch.Tensor):
                 value = value.pooler_output if hasattr(value, "pooler_output") else value[0]
             value = value / value.norm(dim=-1, keepdim=True)
-            return tuple(float(x) for x in value[0])
+            return tuple(value[0].float().cpu().tolist())
 

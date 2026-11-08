@@ -17,6 +17,7 @@ models:
     negative_prompt: "low quality, blurry, distorted, ugly"
   clip:
     path: /home/dataset-assist-0/models/clip-vit-base-patch32
+    device: cuda:1
   pickscore:
     path: /home/dataset-assist-0/models/PickScore_v1
 
