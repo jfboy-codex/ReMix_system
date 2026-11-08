@@ -126,6 +126,32 @@ class RuntimeTests(unittest.TestCase):
             device.close()
             profiler.close()
 
+    def test_early_exit_cancels_queued_requests_but_finishes_active(self):
+        started = threading.Event()
+        release = threading.Event()
+        cache = CacheManager(lambda image, prompt: 0, threshold=1, capacity=1)
+        profiler = ProfileCoordinator(cache, profile_score)
+
+        def foreground(item):
+            started.set()
+            release.wait(2)
+            return item
+
+        device = DeviceManager("test-device", foreground,
+                               ProfileDecoder(FakeDecoder()), profiler)
+        try:
+            active = device.submit("active", lambda item: item)
+            self.assertTrue(started.wait(2))
+            queued = device.submit("queued", lambda item: item)
+            device.cancel_queued()
+            release.set()
+            self.assertEqual(active.result(timeout=2), "active")
+            self.assertTrue(queued.cancelled())
+        finally:
+            release.set()
+            device.close()
+            profiler.close()
+
     def test_step_selection_responds_to_query_gap(self):
         entry = CacheEntry("id", "v1", "source", "image",
                            Profile(0, 9, 0.9, ((0, 0.2), (5, 0.5), (9, 0.9))))

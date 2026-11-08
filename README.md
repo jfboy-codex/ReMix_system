@@ -49,7 +49,7 @@ The two workers must not share one VAE object across devices. Set `policy=ReMixP
 ## Verification
 
 For the reviewer-facing paired profiling experiment (400 requests, FIFO capacity 200, one run per configuration), see [EXPERIMENT_PLAN.md](EXPERIMENT_PLAN.md). Generate a fixed trace with `prepare_trace.py`, then pass it to `run_service.py --trace ... --mode no-profile|idle-profile`. The driver records request, profile, cache, GPU utilization, memory, and output CLIP data in the output directory.
-After installing `.[server]`, `bash run_experiment.sh` runs the full matrix; `bash run_experiment.sh --resume` continues after an interruption and checks trace hashes before keeping finished results.
+After installing `.[server]`, `bash run_experiment.sh` runs the full matrix. Completed responses are written immediately to `images/` and `requests.partial.<attempt>.jsonl`. Ctrl+C or SIGTERM stops new arrivals, cancels queued requests, waits for active requests, and writes `partial_summary.<attempt>.json` plus the metrics collected so far. `bash run_experiment.sh --resume` keeps finished runs after checking trace hashes and reruns an interrupted run from an empty cache in a new attempt; previous partial checkpoints remain available.
 `experiment.request_count: 400` takes the first 400 usable dataset prompts in order. The experiment does not insert synthetic repeats or prompt edits. `serving.cache_capacity: 200` limits resident cache entries independently.
 Run `evaluate_pickscore.py --output <run-directory>` after serving to score generated images with the old experiment's local PickScore model without affecting latency measurements.
 

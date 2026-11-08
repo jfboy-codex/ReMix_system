@@ -89,6 +89,18 @@ class DeviceManager:
     def wait_foreground(self) -> None:
         self._front.join()
 
+    def cancel_queued(self) -> None:
+        """Stop accepting work and cancel requests that have not started."""
+        self._stop = True
+        while True:
+            try:
+                _, future, _ = self._front.get_nowait()
+            except queue.Empty:
+                break
+            future.cancel()
+            self._front.task_done()
+        self._wake.set()
+
     @property
     def queued_foreground(self) -> int:
         """Number of foreground requests waiting, excluding the active request."""

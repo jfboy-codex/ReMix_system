@@ -44,7 +44,7 @@ PY
         echo "[$dataset/$load/$mode] Serving result already complete"
       else
         "$python_bin" run_service.py --config "$config" --trace "$trace" \
-          --mode "$mode" --output "$run_dir" 2>&1 | tee "$run_dir/run.log"
+          --mode "$mode" --output "$run_dir" 2>&1 | tee -i "$run_dir/run.log"
       fi
 
       if [[ -f "$run_dir/pickscore_summary.json" ]]; then

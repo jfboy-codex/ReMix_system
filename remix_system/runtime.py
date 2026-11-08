@@ -80,8 +80,12 @@ class ReMixRuntime:
                           time.perf_counter())
         return self.small.submit(plan, complete)
 
-    def close(self, drain_profiles: bool = True, timeout: float | None = 30) -> bool:
+    def close(self, drain_profiles: bool = True, timeout: float | None = 30,
+              cancel_pending: bool = False) -> bool:
         self._closed = True
+        if cancel_pending:
+            self.large.cancel_queued()
+            self.small.cancel_queued()
         # Foreground requests finish before optional profile drain.
         self.large.wait_foreground()
         self.small.wait_foreground()

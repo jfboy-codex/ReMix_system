@@ -9,13 +9,16 @@ import argparse
 import copy
 import hashlib
 import json
+import os
 import random
+import signal
 import threading
 import time
 from pathlib import Path
 
 from remix_system import ReMixRuntime
 from remix_system.data import dataset_prompts
+from remix_system.checkpoint import RequestRecorder
 from remix_system.events import EventLog
 from remix_system.experiment import read_trace, summarize, write_jsonl
 from remix_system.hardware import GpuSampler
@@ -135,6 +138,8 @@ def main() -> None:
     total_requests = len(trace) if trace is not None else len(source_prompts)
 
     output.mkdir(parents=True, exist_ok=True)
+    attempt_id = time.strftime("%Y%m%dT%H%M%S") + f"-{os.getpid()}"
+    recorder = RequestRecorder(output, attempt_id)
     sampler = GpuSampler((int(large_cfg["device"].split(":")[1]),
                           int(small_cfg["device"].split(":")[1])),
                          config["experiment"]["gpu_sample_interval_s"])
@@ -146,12 +151,22 @@ def main() -> None:
     progress_lock = threading.Lock()
     last_refresh = 0.0
     failed_requests = 0
+    cancelled_requests = 0
+
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def request_stop(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, request_stop)
 
     def update_progress(finished: object = None) -> None:
-        nonlocal last_refresh, failed_requests
+        nonlocal last_refresh, failed_requests, cancelled_requests
         with progress_lock:
             if finished is not None:
-                if finished.exception() is None:
+                if finished.cancelled():
+                    cancelled_requests += 1
+                elif finished.exception() is None:
                     progress.update(1)
                 else:
                     failed_requests += 1
@@ -159,7 +174,8 @@ def main() -> None:
                 f"sd35_q={service.large.queued_foreground} "
                 f"sd15_q={service.small.queued_foreground} "
                 f"cache={service.cache.size}/{capacity}"
-                + (f" failed={failed_requests}" if failed_requests else ""),
+                + (f" failed={failed_requests}" if failed_requests else "")
+                + (f" cancelled={cancelled_requests}" if cancelled_requests else ""),
                 refresh=False)
             now = time.perf_counter()
             if now - last_refresh >= 1.0:
@@ -167,6 +183,8 @@ def main() -> None:
                 last_refresh = now
 
     update_progress()
+    interrupted = False
+    run_error = None
     try:
         if trace is not None:
             for row in trace:
@@ -175,6 +193,9 @@ def main() -> None:
                     time.sleep(delay)
                 future = service.submit(row["prompt"])
                 future.add_done_callback(update_progress)
+                future.add_done_callback(
+                    lambda done, prompt=row["prompt"], meta=row:
+                    recorder.record(prompt, done, meta))
                 futures.append((row["prompt"], future, row))
                 update_progress()
         else:
@@ -189,35 +210,53 @@ def main() -> None:
                     time.sleep(delay)
                 future = service.submit(prompt)
                 future.add_done_callback(update_progress)
+                future.add_done_callback(
+                    lambda done, prompt=prompt: recorder.record(prompt, done, None))
                 futures.append((prompt, future, None))
                 update_progress()
-        results = [(prompt, future.result(), meta) for prompt, future, meta in futures]
+        for _, future, _ in futures:
+            future.result()
         responses_finished = time.perf_counter()
+    except KeyboardInterrupt:
+        interrupted = True
+    except Exception as exc:
+        run_error = str(exc)
     finally:
-        drained = service.close(drain_profiles=not args.skip_profile_drain)
+        drained = service.close(drain_profiles=not args.skip_profile_drain and
+                                not (interrupted or run_error),
+                                cancel_pending=bool(interrupted or run_error))
         sampler.stop()
         progress.close()
+        recorder.close()
+        signal.signal(signal.SIGTERM, previous_sigterm)
     all_work_finished = time.perf_counter()
+    if interrupted or run_error:
+        responses_finished = all_work_finished
 
-    images = output / "images"
-    images.mkdir(exist_ok=True)
+    from PIL import Image
     clip_scores = []
+    ordered_rows = sorted(recorder.rows, key=lambda row: (
+        row["trace_index"] if row["trace_index"] is not None else float("inf")))
     with (output / "requests.jsonl").open("w", encoding="utf-8") as out:
-        for prompt, result, meta in results:
-            result.image.save(images / f"{result.request_id}.png")
-            score = clip(result.image, prompt)
+        for row in ordered_rows:
+            with Image.open(recorder.images / f"{row['request_id']}.png") as image:
+                score = clip(image.convert("RGB"), row["prompt"])
             clip_scores.append(score)
-            out.write(json.dumps({
-                "request_id": result.request_id, "prompt": prompt,
-                "path": result.path, "end_to_end_s": result.end_to_end_seconds,
-                "clip_score": score,
-                "trace_index": meta.get("index") if meta else None,
-            }, ensure_ascii=False) + "\n")
+            out.write(json.dumps({**row, "clip_score": score}, ensure_ascii=False) + "\n")
     events.save(output / "events.jsonl")
     write_jsonl(output / "gpu_samples.jsonl", sampler.samples)
     measured, entries = summarize(events.snapshot(), sampler.samples)
     write_jsonl(output / "cache_entries.jsonl", entries)
+    complete = (not interrupted and run_error is None and
+                not recorder.errors and len(recorder.rows) == total_requests)
     summary = {
+        "run_status": "complete" if complete else "partial",
+        "attempt_id": attempt_id,
+        "checkpoint_path": str(recorder.path),
+        "requested_count": total_requests,
+        "submitted_count": len(futures),
+        "request_errors": recorder.errors,
+        "run_error": run_error,
         "mode": args.mode,
         "trace": str(args.trace) if args.trace else None,
         "trace_sha256": hashlib.sha256(args.trace.read_bytes()).hexdigest() if args.trace else None,
@@ -225,9 +264,9 @@ def main() -> None:
         "replacement": "fifo",
         "clip_device": clip_device,
         "mean_output_clip_score": sum(clip_scores) / len(clip_scores) if clip_scores else None,
-        "count": len(results),
+        "count": len(recorder.rows),
         "response_window_s": responses_finished - started,
-        "throughput_responses_per_s": (len(results) / (responses_finished - started)
+        "throughput_responses_per_s": (len(recorder.rows) / (responses_finished - started)
                                        if responses_finished > started else 0),
         "all_work_window_s": all_work_finished - started,
         "profiles_drained": drained,
@@ -236,8 +275,12 @@ def main() -> None:
         "profile_errors": [str(error) for _, error in service.profiles.errors],
         **measured,
     }
-    (output / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    summary_path = output / ("summary.json" if complete else
+                             f"partial_summary.{attempt_id}.json")
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))
+    if not complete:
+        raise SystemExit(130 if interrupted else 1)
 
 
 if __name__ == "__main__":
