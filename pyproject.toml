@@ -25,5 +25,5 @@ server = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["remix_system*"]
+include = ["remix_system*", "src*"]
 

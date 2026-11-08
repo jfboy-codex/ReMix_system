@@ -78,6 +78,10 @@ def main() -> None:
         parser.error("--interarrival-ms cannot be used with --trace")
     profile_enabled = args.mode == "idle-profile"
 
+    # The patched SD1.5 pipeline imports this only on its first soft-edit hit.
+    # Check before the long run so a missing installation fails immediately.
+    from src.mask_algo import ExpandingMask  # noqa: F401
+
     import torch
     from diffusers import DDIMScheduler, StableDiffusion3Pipeline, StableDiffusionImg2ImgPipeline
     from tqdm import tqdm
@@ -135,16 +139,22 @@ def main() -> None:
                     dynamic_ncols=True, mininterval=1.0)
     progress_lock = threading.Lock()
     last_refresh = 0.0
+    failed_requests = 0
 
-    def update_progress(completed: bool = False) -> None:
-        nonlocal last_refresh
+    def update_progress(finished: object = None) -> None:
+        nonlocal last_refresh, failed_requests
         with progress_lock:
+            if finished is not None:
+                if finished.exception() is None:
+                    progress.update(1)
+                else:
+                    failed_requests += 1
             progress.set_postfix_str(
                 f"sd35_q={service.large.queued_foreground} "
                 f"sd15_q={service.small.queued_foreground} "
-                f"cache={service.cache.size}/{capacity}", refresh=False)
-            if completed:
-                progress.update(1)
+                f"cache={service.cache.size}/{capacity}"
+                + (f" failed={failed_requests}" if failed_requests else ""),
+                refresh=False)
             now = time.perf_counter()
             if now - last_refresh >= 1.0:
                 progress.refresh()
@@ -158,7 +168,7 @@ def main() -> None:
                 if delay > 0:
                     time.sleep(delay)
                 future = service.submit(row["prompt"])
-                future.add_done_callback(lambda _future: update_progress(completed=True))
+                future.add_done_callback(update_progress)
                 futures.append((row["prompt"], future, row))
                 update_progress()
         else:
@@ -172,7 +182,7 @@ def main() -> None:
                 if delay:
                     time.sleep(delay)
                 future = service.submit(prompt)
-                future.add_done_callback(lambda _future: update_progress(completed=True))
+                future.add_done_callback(update_progress)
                 futures.append((prompt, future, None))
                 update_progress()
         results = [(prompt, future.result(), meta) for prompt, future, meta in futures]
