@@ -15,24 +15,31 @@ def make_trace(config: dict, dataset: str, load: str) -> list[dict]:
     spec = config["experiment"]
     if spec["replacement"].lower() != "fifo":
         raise ValueError("only FIFO is supported")
-    if spec["request_count"] != (spec["unique_pool"] + spec["exact_reuses"]
-                                  + spec["edited_reuses"]):
-        raise ValueError("request count must equal unique + exact + edited")
+    workload = spec["workload"]
+    source_count = workload["source_prompts"]
+    initial_count = workload["initial_prompts"]
+    exact_count = workload["exact_reuses"]
+    edited_count = workload["edited_reuses"]
+    if (not all(isinstance(n, int) for n in (source_count, initial_count,
+                                             exact_count, edited_count))
+            or source_count <= 0 or not 1 <= initial_count <= source_count
+            or exact_count < 0 or edited_count < 0):
+        raise ValueError("invalid experiment.workload prompt counts")
+    request_count = source_count + exact_count + edited_count
     base = list(dataset_prompts(config, dataset))
-    if len(base) < spec["unique_pool"]:
-        raise ValueError(f"need {spec['unique_pool']} source prompts, got {len(base)}")
-    base = base[:spec["unique_pool"]]
-    initial_count = spec["unique_pool"] // 2
+    if len(base) < source_count:
+        raise ValueError(f"need {source_count} source prompts, got {len(base)}")
+    base = base[:source_count]
     initial = [{"prompt": p, "kind": "initial", "source_index": i}
                for i, p in enumerate(base[:initial_count])]
     tail = [{"prompt": p, "kind": "new", "source_index": i}
             for i, p in enumerate(base[initial_count:], start=initial_count)]
     rng = random.Random(config["serving"]["seed"])
-    for i in range(spec["exact_reuses"]):
+    for i in range(exact_count):
         source = i % initial_count
         tail.append({"prompt": base[source], "kind": "exact", "source_index": source})
     suffixes = (" in watercolor style", " at sunset")
-    for i in range(spec["edited_reuses"]):
+    for i in range(edited_count):
         source = i % initial_count
         tail.append({"prompt": base[source] + suffixes[i % len(suffixes)],
                      "kind": "edited", "source_index": source})
@@ -45,7 +52,7 @@ def make_trace(config: dict, dataset: str, load: str) -> list[dict]:
     for index, item in enumerate(initial + tail):
         elapsed += rng.gammavariate(arrival["gamma_shape"], arrival["gamma_scale_s"])
         trace.append({"index": index, "arrival_s": elapsed, **item})
-    assert len(trace) == spec["request_count"]
+    assert len(trace) == request_count
     return trace
 
 

@@ -25,11 +25,9 @@ datasets:
   coco:
     path: coco_caption
     split: val
-    num_samples: 400
     seed: 42
   diffusiondb:
     path: diffusiondb_10k
-    num_samples: 400
     seed: 42
 
 serving:
@@ -56,10 +54,11 @@ output:
   root: outputs
 
 experiment:
-  request_count: 800
-  unique_pool: 400
-  exact_reuses: 200
-  edited_reuses: 200
+  workload:
+    source_prompts: 400
+    initial_prompts: 200
+    exact_reuses: 200
+    edited_reuses: 200
   repetitions: 1
   replacement: fifo
   loads:
