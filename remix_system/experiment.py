@@ -1,4 +1,4 @@
-"""Deterministic 800-request workload and compact event summaries."""
+"""Deterministic request workload and compact event summaries."""
 from __future__ import annotations
 
 import json

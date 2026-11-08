@@ -1,4 +1,4 @@
-"""Create one fixed 800-request trace to share across profiling modes."""
+"""Create one fixed request trace to share across profiling modes."""
 from __future__ import annotations
 
 import argparse

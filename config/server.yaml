@@ -55,10 +55,10 @@ output:
 
 experiment:
   workload:
-    source_prompts: 400
-    initial_prompts: 200
-    exact_reuses: 200
-    edited_reuses: 200
+    source_prompts: 200
+    initial_prompts: 100
+    exact_reuses: 100
+    edited_reuses: 100
   repetitions: 1
   replacement: fifo
   loads:
